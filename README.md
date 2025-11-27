@@ -187,5 +187,3 @@ Keep config.json and .env out of version control if they contain secrets.
 Ensure proper CORS when deploying.
 Ensure SECRET_KEY is secure in production.
 ```
-
-# END OF README
