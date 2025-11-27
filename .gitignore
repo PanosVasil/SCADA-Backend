@@ -1,19 +1,20 @@
-﻿__pycache__/
-*.pyc
+﻿# Python
+__pycache__/
+*.py[cod]
 *.pyo
-*.pyd
-.env
-.env.*
-.env.local
-.venv/
-venv/
-certs/
-*.log
-dist/
-build/
-.coverage
-htmlcov/
-.idea/
-.vscode/
-.DS_Store
 
+# Virtual envs
+venv/
+.venv/
+
+# Local config
+.env
+
+# Certificates / secrets
+certs/
+*.key
+*.pfx
+*.pem
+
+# Dev tools (optional)
+dev_tools/

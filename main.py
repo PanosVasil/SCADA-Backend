@@ -226,7 +226,8 @@ class OpcUaClient:
                 return data
             values = self.client.get_values(ids)
             for n, v in zip(names, values):
-                data["nodes"][n] = str(v)
+                data.setdefault("nodes", {})
+                data["nodes"][n] = v
         except UaStatusCodeError as e:
             self.status = ConnectionStatus.ERROR
             data["error"] = f"OPC UA read error: {e}"
@@ -313,11 +314,18 @@ def data_broadcast_loop(loop: asyncio.AbstractEventLoop):
                 for ws in list(sockets):
                     try:
                         allowed = getattr(ws, "allowed_urls", None)
-                        visible = (
-                            [d for d in all_plc_data if (d.get("url") in allowed)]
-                            if allowed else all_plc_data
-                        )
-                        payload = {"type": "telemetry_update", "data": _payload_from_raw_list(visible)}
+                        if allowed:
+                            visible_raw = [d for d in all_plc_data if d.get("url") in allowed]
+                        else:
+                            visible_raw = all_plc_data
+
+                        # Convert each raw OPC block into canonical frontend shape
+                        visible_payload = _payload_from_raw_list(visible_raw)
+
+                        payload = {
+                            "type": "telemetry_update",
+                            "data": visible_payload
+                        }
                         asyncio.run_coroutine_threadsafe(ws.send_json(payload), loop)
                     except Exception as e:
                         logging.error(f"WebSocket send error for {user_id}: {e}")
@@ -411,22 +419,132 @@ async def list_users(
     ]
 
 @app.post("/write_value")
-async def write_plc_value(req: WriteRequest, user: DBUser = Depends(current_user)):
-    if not user.is_superuser:
-        raise HTTPException(403, "Write requires superuser privileges.")
+async def write_plc_value(
+    req: WriteRequest,
+    user: DBUser = Depends(current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """
+    Generic write endpoint.
+
+    - Scalar values (numbers / bools / strings) are written directly to the node
+      with name == req.node_name (this is what the setpoint inputs use).
+    - For CMD_Instant_Cutoff we support a special array write:
+        value = [True, False]  -> bit0=False, bit1=True  (park OFF or ON depending on your mapping)
+      and we resolve the correct child nodes [0], [1] under the array node.
+    """
+
+    # ------------------------------------------------------------------
+    # 1) PERMISSIONS: superuser OR user with access to this park
+    # ------------------------------------------------------------------
+    # Build the set of URLs this user is allowed to control
+    if user.is_superuser:
+        allowed_urls = {cfg["url"] for cfg in PLC_CONFIG}
+    else:
+        res = await session.execute(
+            select(UserParkAccess.park_id).where(UserParkAccess.user_id == user.id)
+        )
+        park_ids = [r[0] for r in res.all()]
+        allowed_urls = {PARKS[p]["url"] for p in park_ids if p in PARKS}
+
+    if req.plc_url not in allowed_urls:
+        # User can see only their assigned parks via /data and /ws, but this is
+        # a second safety belt so no one can write to a park they don't own.
+        raise HTTPException(403, "You do not have write access to this park.")
+
+    # ------------------------------------------------------------------
+    # 2) Resolve target PLC client
+    # ------------------------------------------------------------------
     target = next((p for p in plc_clients if p.url == req.plc_url), None)
     if not target or target.status != ConnectionStatus.CONNECTED:
         raise HTTPException(404, "PLC not connected.")
+
+    # ------------------------------------------------------------------
+    # 3) SPECIAL CASE: CMD_Instant_Cutoff as 2-bit boolean array
+    # ------------------------------------------------------------------
+    if isinstance(req.value, list) and req.node_name == "CMD_Instant_Cutoff":
+        parent = target.nodes.get("CMD_Instant_Cutoff")
+        if not parent:
+            logging.error("Array parent node 'CMD_Instant_Cutoff' not found.")
+            raise HTTPException(404, "Array node 'CMD_Instant_Cutoff' not found.")
+
+        try:
+            children = parent.get_children()
+        except Exception as e:
+            logging.error(f"Failed to get children for CMD_Instant_Cutoff: {e}")
+            raise HTTPException(500, "Failed to resolve cutoff child nodes.")
+
+        # Build index -> child-node map for [0], [1] under THIS array
+        index_map: dict[int, Any] = {}
+        for child in children:
+            try:
+                bn = child.get_browse_name().Name  # e.g. "[0]", "[1]"
+                if bn.startswith("[") and bn.endswith("]"):
+                    idx = int(bn[1:-1])
+                    index_map[idx] = child
+            except Exception:
+                continue
+
+        if not index_map:
+            logging.error("No [index] children found under CMD_Instant_Cutoff.")
+            raise HTTPException(404, "Cutoff child bits not found.")
+
+        # Write each bit to its proper child
+        for idx, bit in enumerate(req.value):
+            child = index_map.get(idx)
+            if child is None:
+                logging.error(f"Child index [{idx}] not found under CMD_Instant_Cutoff.")
+                raise HTTPException(404, f"Cutoff bit [{idx}] not found.")
+
+            try:
+                dv = ua.DataValue(ua.Variant(bool(bit), ua.VariantType.Boolean))
+                child.set_attribute(ua.AttributeIds.Value, dv)
+                logging.info(f"Write {bit} to 'CMD_Instant_Cutoff[{idx}]' on {target.name}")
+            except Exception as e:
+                logging.error(f"Write failed on CMD_Instant_Cutoff[{idx}]: {e}")
+                raise HTTPException(500, f"Write failed on cutoff bit [{idx}]: {e}")
+
+        return {"status": "success", "written": req.value}
+
+    # For any other list value we don't support array writes yet
+    if isinstance(req.value, list):
+        raise HTTPException(
+            400,
+            "Array writes are only supported for 'CMD_Instant_Cutoff' at the moment.",
+        )
+
+    # ------------------------------------------------------------------
+    # 4) NORMAL SCALAR WRITE (setpoints etc.)
+    # ------------------------------------------------------------------
     node = target.nodes.get(req.node_name)
     if not node:
         raise HTTPException(404, f"Node '{req.node_name}' not found.")
+
     try:
         vt = node.get_data_type_as_variant_type()
-        v = int(req.value) if isinstance(req.value, float) else req.value
+        v: Any = req.value
+
+        # Coerce Python type based on OPC UA data type
+        if vt == ua.VariantType.Boolean:
+            v = bool(v)
+        elif vt in (
+            ua.VariantType.Int16,
+            ua.VariantType.Int32,
+            ua.VariantType.Int64,
+            ua.VariantType.UInt16,
+            ua.VariantType.UInt32,
+            ua.VariantType.UInt64,
+        ):
+            v = int(v)
+        elif vt in (ua.VariantType.Float, ua.VariantType.Double):
+            v = float(v)
+        # strings etc. pass through
+
         dv = ua.DataValue(ua.Variant(v, vt))
         node.set_attribute(ua.AttributeIds.Value, dv)
         logging.info(f"Write {v} to '{req.node_name}' on {target.name}")
         return {"status": "success"}
+
     except Exception as e:
         logging.error(f"Write failed: {e}")
         raise HTTPException(500, f"Write failed: {e}")

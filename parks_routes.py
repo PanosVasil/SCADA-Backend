@@ -9,17 +9,36 @@ from models_user import User
 from models_user_park import UserParkAccess
 from db_async import get_async_session
 from auth import current_superuser
-from parks import PARKS
+from parks import PARKS   # ← dict { park_id: {name, url} }
+
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-# --- List all parks (from config.json) ---
-@router.get("/parks", response_model=List[str])
-async def list_parks(_: User = Depends(current_superuser)):
-    return list(PARKS.keys())
+# ------------------------
+# Pydantic Model Returned
+# ------------------------
+class ParkOut(BaseModel):
+    id: str
+    name: str
+    url: str
 
-# --- List user’s park IDs ---
-@router.get("/users/{user_id}/parks", response_model=List[str])
+
+# ------------------------
+# List all parks
+# ------------------------
+@router.get("/parks", response_model=List[ParkOut])
+async def list_parks(_: User = Depends(current_superuser)):
+    return [
+        ParkOut(id=pid, name=data["name"], url=data["url"])
+        for pid, data in PARKS.items()
+    ]
+
+
+# ------------------------
+# List all parks assigned to a user
+# ------------------------
+@router.get("/users/{user_id}/parks", response_model=List[ParkOut])
 async def get_user_parks(
     user_id: UUID,
     _: User = Depends(current_superuser),
@@ -28,10 +47,23 @@ async def get_user_parks(
     res = await session.execute(
         select(UserParkAccess.park_id).where(UserParkAccess.user_id == user_id)
     )
-    return [r[0] for r in res.all()]
+    ids = [r[0] for r in res.all()]
 
-# --- Grant a park to a user ---
-@router.post("/users/{user_id}/parks/{park_id}", status_code=status.HTTP_204_NO_CONTENT)
+    # only return parks that still exist in config.json
+    return [
+        ParkOut(id=pid, name=PARKS[pid]["name"], url=PARKS[pid]["url"])
+        for pid in ids
+        if pid in PARKS
+    ]
+
+
+# ------------------------
+# Grant park access
+# ------------------------
+@router.post(
+    "/users/{user_id}/parks/{park_id}",
+    status_code=status.HTTP_204_NO_CONTENT
+)
 async def grant_user_park(
     user_id: UUID,
     park_id: str,
@@ -41,18 +73,24 @@ async def grant_user_park(
     if park_id not in PARKS:
         raise HTTPException(404, f"Unknown park id: {park_id}")
 
-    existing = await session.execute(
+    exists = await session.execute(
         select(UserParkAccess).where(
             UserParkAccess.user_id == user_id,
-            UserParkAccess.park_id == park_id,
+            UserParkAccess.park_id == park_id
         )
     )
-    if existing.scalar_one_or_none() is None:
+    if exists.scalar_one_or_none() is None:
         session.add(UserParkAccess(user_id=user_id, park_id=park_id))
         await session.commit()
 
-# --- Revoke a park from a user ---
-@router.delete("/users/{user_id}/parks/{park_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+# ------------------------
+# Revoke park access
+# ------------------------
+@router.delete(
+    "/users/{user_id}/parks/{park_id}",
+    status_code=status.HTTP_204_NO_CONTENT
+)
 async def revoke_user_park(
     user_id: UUID,
     park_id: str,
@@ -62,7 +100,7 @@ async def revoke_user_park(
     await session.execute(
         delete(UserParkAccess).where(
             UserParkAccess.user_id == user_id,
-            UserParkAccess.park_id == park_id,
+            UserParkAccess.park_id == park_id
         )
     )
     await session.commit()
