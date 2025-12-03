@@ -80,7 +80,7 @@ You can now sign in with your email address: {to_email}
 
 If you did not request this, please contact the administrator.
 
-— SCADA Portal
+— KTL Control Systems
 """
     )
     return msg

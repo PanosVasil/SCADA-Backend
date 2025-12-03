@@ -16,6 +16,6 @@
     { "id": "mazi",        "url": "opc.tcp://192.168.54.230:4840", "name": "Mazi"        }
   ],
   "common_root_node_id": "ns=4;i=2",
-  "broadcast_interval_seconds": 5.0,
+  "broadcast_interval_seconds": 2.0,
   "plc_reconnect_delay_minutes": 10
 }

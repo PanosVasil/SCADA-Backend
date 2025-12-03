@@ -72,6 +72,7 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load config.json: {e}")
 
+
 # ---------------------------------------------------------------------
 # APP + LOGGING + CORS
 # ---------------------------------------------------------------------
@@ -188,31 +189,49 @@ class OpcUaClient:
 
     def connect_and_discover(self) -> bool:
         self.last_reconnect_attempt = datetime.now()
+
+        # Cleanly disconnect existing client
         if self.client:
             try:
                 self.client.disconnect()
             except Exception:
                 pass
+
         self.client = Client(self.url, timeout=40)
         self.status = ConnectionStatus.CONNECTING
         self.nodes = {}
-        logging.info(f"'{self.name}': 🔄 Connecting...")
+
+        logging.info(f"{self.name}: 🔄 Connecting...")
+
         try:
             self.client.connect()
+
+            # Optional metadata read
             try:
-                self.server_name = self.client.get_node("ns=0;i=2254").get_value() or ""
+                self.server_name = (
+                    self.client.get_node("ns=0;i=2254").get_value() or ""
+                )
             except Exception:
                 self.server_name = ""
+
+            # 🔥 ALWAYS rebuild node map after connecting (fixes stale node handles)
             root_node = self.client.get_node(self.root_node_id)
             self.nodes = self._get_readable_nodes(root_node)
+            logging.info(
+                f"{self.name}: 🔁 Node map rebuilt ({len(self.nodes)} nodes)"
+            )
+
             self.status = ConnectionStatus.CONNECTED
-            logging.info(f"{self.name}: ✅ CONNECTED ({len(self.nodes)} nodes)")
+            logging.info(f"{self.name}: ✅ CONNECTED")
+
             return True
+
         except Exception as e:
             self.status = ConnectionStatus.DISCONNECTED
             logging.error(f"{self.name}: ❌ Connection error: {e}")
             self.client = None
             return False
+
 
     def read_data(self) -> Dict[str, Any]:
         data = {"name": self.name, "status": self.status.value, "url": self.url, "nodes": {}}
@@ -437,7 +456,6 @@ async def write_plc_value(
     # ------------------------------------------------------------------
     # 1) PERMISSIONS: superuser OR user with access to this park
     # ------------------------------------------------------------------
-    # Build the set of URLs this user is allowed to control
     if user.is_superuser:
         allowed_urls = {cfg["url"] for cfg in PLC_CONFIG}
     else:
@@ -448,8 +466,6 @@ async def write_plc_value(
         allowed_urls = {PARKS[p]["url"] for p in park_ids if p in PARKS}
 
     if req.plc_url not in allowed_urls:
-        # User can see only their assigned parks via /data and /ws, but this is
-        # a second safety belt so no one can write to a park they don't own.
         raise HTTPException(403, "You do not have write access to this park.")
 
     # ------------------------------------------------------------------
@@ -540,14 +556,39 @@ async def write_plc_value(
             v = float(v)
         # strings etc. pass through
 
+        # --- DEBUG: read before write (best-effort, does not affect behavior) ---
+        try:
+            before = node.get_value()
+            logging.info(
+                f"[WRITE DEBUG] Before write '{req.node_name}' on {target.name}: {before!r} (type={type(before).__name__}, vt={vt})"
+            )
+        except Exception as e:
+            logging.debug(f"[WRITE DEBUG] Could not read 'before' value for {req.node_name}: {e}")
+
         dv = ua.DataValue(ua.Variant(v, vt))
         node.set_attribute(ua.AttributeIds.Value, dv)
         logging.info(f"Write {v} to '{req.node_name}' on {target.name}")
+
+        # --- DEBUG: read after write (best-effort) ---
+        try:
+            after = node.get_value()
+            logging.info(
+                f"[WRITE DEBUG] After write '{req.node_name}' on {target.name}: {after!r} (type={type(after).__name__})"
+            )
+            if after != v:
+                logging.warning(
+                    f"[WRITE DEBUG] MISMATCH for '{req.node_name}' on {target.name}: wrote {v!r}, server reports {after!r}"
+                )
+        except Exception as e:
+            logging.debug(f"[WRITE DEBUG] Could not read 'after' value for {req.node_name}: {e}")
+
         return {"status": "success"}
 
     except Exception as e:
         logging.error(f"Write failed: {e}")
-        raise HTTPException(500, f"Write failed: {e}")
+        raise HTTPException(500, f"Write failed.")
+
+
 
 # ---------------------------------------------------------------------
 # DATA (REST) — same canonical shape as WS
