@@ -1,20 +1,28 @@
 ﻿# Python
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
-
-# Virtual envs
-venv/
+*.pyd
 .venv/
+env/
+venv/
 
-# Local config
+# IDE
+.vscode/
+.idea/
+
+# Environment files
 .env
 
-# Certificates / secrets
-certs/
-*.key
-*.pfx
-*.pem
+# Certificates
+certs/*.pem
+certs/*.der
+certs/*.key
+
+# Local DB or cache
+*.db
+.cache/
+
 
 # Dev tools (optional)
 dev_tools/
