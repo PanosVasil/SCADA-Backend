@@ -1,21 +1,25 @@
 {
   "plc_config": [
-    { "id": "eco_solar",   "url": "opc.tcp://192.168.41.230:4840", "name": "Eco Solar"   },
-    { "id": "isiada",      "url": "opc.tcp://192.168.42.230:4840", "name": "Isiada"      },
-    { "id": "ecg_1000",    "url": "opc.tcp://192.168.43.230:4840", "name": "ECG 1000"    },
-    { "id": "ecg_800",     "url": "opc.tcp://192.168.44.230:4840", "name": "ECG 800"     },
-    { "id": "the_solar",   "url": "opc.tcp://192.168.45.230:4840", "name": "The Solar"   },
-    { "id": "hlios",       "url": "opc.tcp://192.168.46.230:4840", "name": "Hlios"       },
-    { "id": "zizilioti",   "url": "opc.tcp://192.168.47.230:4840", "name": "Zizilioti"   },
-    { "id": "dp_solar",    "url": "opc.tcp://192.168.48.230:4840", "name": "DP Solar"    },
-    { "id": "aiginio",     "url": "opc.tcp://192.168.49.230:4840", "name": "Aiginio"     },
+    { "id": "eco_solar",   "url": "opc.tcp://192.168.41.230:4840", "name": "Eco Solar" },
+    { "id": "isiada",      "url": "opc.tcp://192.168.42.230:4840", "name": "Isiada" },
+    { "id": "ecg_1000",    "url": "opc.tcp://192.168.43.230:4840", "name": "ECG 1000" },
+    { "id": "ecg_800",     "url": "opc.tcp://192.168.44.230:4840", "name": "ECG 800" },
+    { "id": "the_solar",   "url": "opc.tcp://192.168.45.230:4840", "name": "The Solar" },
+    { "id": "hlios",       "url": "opc.tcp://192.168.46.230:4840", "name": "Hlios" },
+    { "id": "zizilioti",   "url": "opc.tcp://192.168.47.230:4840", "name": "Zizilioti" },
+    { "id": "dp_solar",    "url": "opc.tcp://192.168.48.230:4840", "name": "DP Solar" },
+    { "id": "aiginio",     "url": "opc.tcp://192.168.49.230:4840", "name": "Aiginio" },
     { "id": "tsopoulidis", "url": "opc.tcp://192.168.50.230:4840", "name": "Tsopoulidis" },
-    { "id": "katmark",     "url": "opc.tcp://192.168.51.230:4840", "name": "Katmark"     },
-    { "id": "kalami",      "url": "opc.tcp://192.168.52.230:4840", "name": "Kalami"      },
-    { "id": "panorama",    "url": "opc.tcp://192.168.53.230:4840", "name": "Panorama"    },
-    { "id": "mazi",        "url": "opc.tcp://192.168.54.230:4840", "name": "Mazi"        }
+    { "id": "katmark",     "url": "opc.tcp://192.168.51.230:4840", "name": "Katmark" },
+    { "id": "kalami",      "url": "opc.tcp://192.168.52.230:4840", "name": "Kalami" },
+    { "id": "panorama",    "url": "opc.tcp://192.168.53.230:4840", "name": "Panorama" },
+    { "id": "mazi",        "url": "opc.tcp://192.168.54.230:4840", "name": "Mazi" }
   ],
   "common_root_node_id": "ns=4;i=2",
   "broadcast_interval_seconds": 2.0,
-  "plc_reconnect_delay_minutes": 10
+  "plc_reconnect_delay_minutes": 10,
+
+  "timeout_connect": 20,
+  "timeout_metadata": 10,
+  "timeout_discovery": 90
 }

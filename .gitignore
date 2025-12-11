@@ -23,6 +23,5 @@ certs/*.key
 *.db
 .cache/
 
-
-# Dev tools (optional)
-dev_tools/
+# Test tools (optional)
+test_tools/

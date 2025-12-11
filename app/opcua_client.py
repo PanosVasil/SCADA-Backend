@@ -7,6 +7,26 @@ from typing import Any, Dict, Optional
 from opcua import ua, Client
 from opcua.ua.uaerrors import UaStatusCodeError
 import logging
+import concurrent.futures
+
+from app.config import (
+    TIMEOUT_CONNECT,
+    TIMEOUT_METADATA,
+    TIMEOUT_DISCOVERY,
+)
+
+
+def run_with_timeout(func, timeout: float):
+    """
+    Run a blocking function in a temporary thread with a hard timeout.
+    Returns the function result or raises TimeoutError.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as exe:
+        future = exe.submit(func)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds")
 
 
 class ConnectionStatus(str, Enum):
@@ -28,16 +48,11 @@ class OpcUaClient:
         self.last_reconnect_attempt: Optional[datetime] = None
 
     # ----------------------------------------
-    # 🔥 SAFE DISCONNECT — prevents shutdown delays
+    # SAFE DISCONNECT
     # ----------------------------------------
     def disconnect_safe(self):
-        """
-        Fast, safe disconnect that avoids blocking OPC UA disconnect()
-        calls that can hang for 20–40 seconds on Siemens PLCs.
-        """
         try:
             if self.client:
-                # Try to close the underlying websocket/socket directly
                 try:
                     ua_socket = getattr(self.client.uaclient, "_uasocket", None)
                     if ua_socket:
@@ -50,7 +65,6 @@ class OpcUaClient:
                 except Exception:
                     pass
 
-                # Avoid calling .disconnect(), which blocks
                 self.client = None
 
         except Exception:
@@ -59,10 +73,15 @@ class OpcUaClient:
         self.status = ConnectionStatus.DISCONNECTED
 
     # ----------------------------------------
-    # NODE DISCOVERY
+    # NODE DISCOVERY (wrapped in a timeout)
     # ----------------------------------------
+    def _discover_nodes(self):
+        root = self.client.get_node(self.root_node_id)
+        return self._get_readable_nodes(root)
+
     def _get_readable_nodes(self, node) -> dict:
         nodes_dict: Dict[str, Any] = {}
+
         try:
             if node.get_node_class() == ua.NodeClass.Variable:
                 nodes_dict[node.get_browse_name().Name] = node
@@ -78,8 +97,11 @@ class OpcUaClient:
         return nodes_dict
 
     # ----------------------------------------
-    # CONNECT + DISCOVER NODES
+    # CONNECT + DISCOVER NODES  (ALL TIMEOUT PROTECTED)
     # ----------------------------------------
+    def _perform_connect(self):
+        self.client.connect()
+
     def connect_and_discover(self) -> bool:
         self.last_reconnect_attempt = datetime.now()
 
@@ -96,28 +118,44 @@ class OpcUaClient:
         logging.info(f"{self.name}: 🔄 Connecting to {self.url} ...")
 
         try:
-            self.client.connect()
+            # CONNECT TIMEOUT
+            run_with_timeout(self._perform_connect, TIMEOUT_CONNECT)
 
-            # Optional metadata read
+            # METADATA TIMEOUT
+            def read_metadata():
+                try:
+                    return self.client.get_node("ns=0;i=2254").get_value()
+                except Exception:
+                    return ""
+
             try:
-                self.server_name = (
-                    self.client.get_node("ns=0;i=2254").get_value() or ""
-                )
-            except Exception:
+                self.server_name = run_with_timeout(read_metadata, TIMEOUT_METADATA) or ""
+            except TimeoutError:
+                logging.warning(f"{self.name}: ⏳ Metadata read timed out")
                 self.server_name = ""
 
-            # Build node map fresh on each connection
-            root_node = self.client.get_node(self.root_node_id)
-            self.nodes = self._get_readable_nodes(root_node)
+            # DISCOVERY TIMEOUT
+            try:
+                self.nodes = run_with_timeout(self._discover_nodes, TIMEOUT_DISCOVERY)
+            except TimeoutError:
+                logging.error(f"{self.name}: ⏳ Node discovery timed out")
+                self.status = ConnectionStatus.ERROR
+                return False
 
             logging.info(f"{self.name}: 🔁 Node map built ({len(self.nodes)} nodes).")
             self.status = ConnectionStatus.CONNECTED
             logging.info(f"{self.name}: ✅ CONNECTED")
             return True
 
-        except Exception as e:
+        except TimeoutError as e:
+            logging.error(f"{self.name}: ⏳ Connection timeout: {e}")
             self.status = ConnectionStatus.DISCONNECTED
+            self.client = None
+            return False
+
+        except Exception as e:
             logging.error(f"{self.name}: ❌ Connection error: {e}")
+            self.status = ConnectionStatus.DISCONNECTED
             self.client = None
             return False
 

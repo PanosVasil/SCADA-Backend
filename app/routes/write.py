@@ -1,21 +1,17 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 import logging
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 from opcua import ua
 
 from auth import current_user
 from db_async import get_async_session
 from models_user import User as DBUser
-from models_user_park import UserParkAccess
-from parks import PARKS
+from parks import PARKS, user_allowed_urls
 from app.broadcast import get_plc_clients
-from app.config import PLC_CONFIG
 from app.opcua_client import ConnectionStatus
 from app.schemas import WriteRequest
-
 
 router = APIRouter(tags=["write"])
 
@@ -40,13 +36,9 @@ async def write_plc_value(
     # 1) PERMISSIONS: superuser OR user with access to this park
     # ------------------------------------------------------------------
     if user.is_superuser:
-        allowed_urls = {cfg["url"] for cfg in PLC_CONFIG}
+        allowed_urls = {info["url"] for info in PARKS.values()}
     else:
-        res = await session.execute(
-            select(UserParkAccess.park_id).where(UserParkAccess.user_id == user.id)
-        )
-        park_ids = [r[0] for r in res.all()]
-        allowed_urls = {PARKS[p]["url"] for p in park_ids if p in PARKS}
+        allowed_urls = await user_allowed_urls(session, user)
 
     if req.plc_url not in allowed_urls:
         raise HTTPException(403, "You do not have write access to this park.")
@@ -144,7 +136,8 @@ async def write_plc_value(
         try:
             before = node.get_value()
             logging.info(
-                f"[WRITE DEBUG] Before write '{req.node_name}' on {target.name}: {before!r} (type={type(before).__name__}, vt={vt})"
+                f"[WRITE DEBUG] Before write '{req.node_name}' on {target.name}: "
+                f"{before!r} (type={type(before).__name__}, vt={vt})"
             )
         except Exception as e:
             logging.debug(f"[WRITE DEBUG] Could not read 'before' value for {req.node_name}: {e}")
@@ -157,11 +150,13 @@ async def write_plc_value(
         try:
             after = node.get_value()
             logging.info(
-                f"[WRITE DEBUG] After write '{req.node_name}' on {target.name}: {after!r} (type={type(after).__name__})"
+                f"[WRITE DEBUG] After write '{req.node_name}' on {target.name}: "
+                f"{after!r} (type={type(after).__name__})"
             )
             if after != v:
                 logging.warning(
-                    f"[WRITE DEBUG] MISMATCH for '{req.node_name}' on {target.name}: wrote {v!r}, server reports {after!r}"
+                    f"[WRITE DEBUG] MISMATCH for '{req.node_name}' on {target.name}: "
+                    f"wrote {v!r}, server reports {after!r}"
                 )
         except Exception as e:
             logging.debug(f"[WRITE DEBUG] Could not read 'after' value for {req.node_name}: {e}")

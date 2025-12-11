@@ -17,5 +17,10 @@ COMMON_ROOT_NODE_ID = config["common_root_node_id"]
 BROADCAST_INTERVAL_SECONDS = float(config["broadcast_interval_seconds"])
 PLC_RECONNECT_DELAY_MINUTES = int(config["plc_reconnect_delay_minutes"])
 
+# 🔥 NEW CONFIGURABLE TIMEOUTS
+TIMEOUT_CONNECT = float(config.get("timeout_connect", 15))
+TIMEOUT_METADATA = float(config.get("timeout_metadata", 2))
+TIMEOUT_DISCOVERY = float(config.get("timeout_discovery", 5))
+
 CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "")
 SECRET_KEY = os.getenv("SECRET_KEY") or "change-me"
