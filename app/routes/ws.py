@@ -47,9 +47,9 @@ async def ws_endpoint(websocket: WebSocket):
     # -----------------------------
     # Determine allowed parks/URLs
     # -----------------------------
-    async for session in get_async_session():  # generator yields exactly one session
+    async for session in get_async_session():
         if user.is_superuser:
-            allowed_urls = {info["url"] for info in PARKS.values()}
+            allowed_urls = None  # unrestricted
         else:
             allowed_urls = await user_allowed_urls(session, user)
 

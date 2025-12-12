@@ -105,12 +105,11 @@ def data_broadcast_loop(loop: asyncio.AbstractEventLoop) -> None:
                             raise RuntimeError("Event loop closed")
 
                         allowed = getattr(ws, "allowed_urls", None)
-                        visible_raw = (
-                            [d for d in all_plc_data if d.get("url") in allowed]
-                            if allowed
-                            else all_plc_data
-                        )
-
+                        if allowed is None:
+                            visible_raw = all_plc_data
+                        else:
+                            visible_raw = [d for d in all_plc_data if d.get("url") in allowed]
+                            
                         payload = {
                             "type": "telemetry_update",
                             "data": payload_from_raw_list(visible_raw),

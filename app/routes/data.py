@@ -29,7 +29,10 @@ async def get_initial_data(
         allowed_urls = await user_allowed_urls(session, user)
 
     clients = get_plc_clients()
-    visible_clients = [p for p in clients if p.url in allowed_urls]
+    if allowed_urls is None:
+        visible_clients = clients
+    else:
+        visible_clients = [p for p in clients if p.url in allowed_urls]
 
     raw = list(executor.map(lambda p: p.read_data(), visible_clients))
     return payload_from_raw_list(raw)
