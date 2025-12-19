@@ -13,6 +13,7 @@ venv/
 
 # Environment files
 .env
+.env.*
 
 # Certificates
 certs/*.pem
@@ -23,5 +24,8 @@ certs/*.key
 *.db
 .cache/
 
-# Test tools (optional)
+# Real Configuration (IP Protection)
+config.json
+
+# Test tools
 test_tools/

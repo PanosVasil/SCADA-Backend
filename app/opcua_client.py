@@ -3,17 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
+import concurrent.futures
+import logging
+import threading
 
 from opcua import ua, Client
 from opcua.ua.uaerrors import UaStatusCodeError
-import logging
-import concurrent.futures
 
-from app.config import (
-    TIMEOUT_CONNECT,
-    TIMEOUT_METADATA,
-    TIMEOUT_DISCOVERY,
-)
+from app.config import TIMEOUT_CONNECT, TIMEOUT_METADATA, TIMEOUT_DISCOVERY
 
 
 def run_with_timeout(func, timeout: float):
@@ -37,49 +34,64 @@ class ConnectionStatus(str, Enum):
 
 
 class OpcUaClient:
+    """
+    Thread-safe-ish wrapper around python-opcua Client.
+    Public API expected by the rest of the project:
+      - connect_and_discover()
+      - read_data()
+      - disconnect_safe()
+    """
+
     def __init__(self, url: str, custom_name: str, root_node_id: str):
         self.url = url
         self.name = custom_name
         self.server_name = ""
         self.root_node_id = root_node_id
+
         self.client: Optional[Client] = None
         self.nodes: Dict[str, Any] = {}
+
         self.status = ConnectionStatus.DISCONNECTED
         self.last_reconnect_attempt: Optional[datetime] = None
 
-    # ----------------------------------------
-    # SAFE DISCONNECT
-    # ----------------------------------------
-    def disconnect_safe(self):
-        try:
-            if self.client:
-                try:
-                    ua_socket = getattr(self.client.uaclient, "_uasocket", None)
-                    if ua_socket:
-                        ws = getattr(ua_socket, "websocket", None)
-                        if ws:
-                            try:
-                                ws.close_connection()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+        # Prevent read/write/connect colliding on the same underlying socket.
+        self._lock = threading.RLock()
 
-                self.client = None
-
-        except Exception:
-            pass
-
-        self.status = ConnectionStatus.DISCONNECTED
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
 
     # ----------------------------------------
-    # NODE DISCOVERY (wrapped in a timeout)
+    # SAFE DISCONNECT (fast shutdown)
     # ----------------------------------------
-    def _discover_nodes(self):
-        root = self.client.get_node(self.root_node_id)
-        return self._get_readable_nodes(root)
+    def disconnect_safe(self) -> None:
+        with self._lock:
+            try:
+                if self.client:
+                    # Best-effort: close underlying socket/websocket
+                    try:
+                        ua_socket = getattr(self.client.uaclient, "_uasocket", None)
+                        if ua_socket:
+                            ws = getattr(ua_socket, "websocket", None)
+                            if ws:
+                                try:
+                                    ws.close_connection()
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
-    def _get_readable_nodes(self, node) -> dict:
+                    # Avoid blocking .disconnect()
+                    self.client = None
+            except Exception:
+                pass
+
+            self.status = ConnectionStatus.DISCONNECTED
+
+    # ----------------------------------------
+    # NODE DISCOVERY
+    # ----------------------------------------
+    def _get_readable_nodes(self, node) -> Dict[str, Any]:
         nodes_dict: Dict[str, Any] = {}
 
         try:
@@ -96,100 +108,106 @@ class OpcUaClient:
 
         return nodes_dict
 
+    def _discover_nodes(self) -> Dict[str, Any]:
+        root = self.client.get_node(self.root_node_id)  # type: ignore[union-attr]
+        return self._get_readable_nodes(root)
+
     # ----------------------------------------
-    # CONNECT + DISCOVER NODES  (ALL TIMEOUT PROTECTED)
+    # CONNECT + DISCOVER (timeouts protected)
     # ----------------------------------------
-    def _perform_connect(self):
-        self.client.connect()
+    def _perform_connect(self) -> None:
+        self.client.connect()  # type: ignore[union-attr]
 
     def connect_and_discover(self) -> bool:
-        self.last_reconnect_attempt = datetime.now()
+        with self._lock:
+            self.last_reconnect_attempt = datetime.now()
 
-        if self.client:
-            try:
-                self.client.disconnect()
-            except Exception:
-                pass
-
-        self.client = Client(self.url, timeout=40)
-        self.status = ConnectionStatus.CONNECTING
-        self.nodes = {}
-
-        logging.info(f"{self.name}: 🔄 Connecting to {self.url} ...")
-
-        try:
-            # CONNECT TIMEOUT
-            run_with_timeout(self._perform_connect, TIMEOUT_CONNECT)
-
-            # METADATA TIMEOUT
-            def read_metadata():
+            # clean old client best-effort
+            if self.client:
                 try:
-                    return self.client.get_node("ns=0;i=2254").get_value()
+                    self.client.disconnect()
                 except Exception:
-                    return ""
+                    pass
+
+            self.client = Client(self.url, timeout=40)
+            self.status = ConnectionStatus.CONNECTING
+            self.nodes = {}
+
+            logging.info(f"{self.name}: 🔄 Connecting to {self.url} ...")
 
             try:
-                self.server_name = run_with_timeout(read_metadata, TIMEOUT_METADATA) or ""
-            except TimeoutError:
-                logging.warning(f"{self.name}: ⏳ Metadata read timed out")
-                self.server_name = ""
+                # CONNECT TIMEOUT
+                run_with_timeout(self._perform_connect, TIMEOUT_CONNECT)
 
-            # DISCOVERY TIMEOUT
-            try:
-                self.nodes = run_with_timeout(self._discover_nodes, TIMEOUT_DISCOVERY)
-            except TimeoutError:
-                logging.error(f"{self.name}: ⏳ Node discovery timed out")
-                self.status = ConnectionStatus.ERROR
+                # METADATA TIMEOUT (optional)
+                def read_metadata():
+                    try:
+                        return self.client.get_node("ns=0;i=2254").get_value()
+                    except Exception:
+                        return ""
+
+                try:
+                    self.server_name = run_with_timeout(read_metadata, TIMEOUT_METADATA) or ""
+                except TimeoutError:
+                    logging.warning(f"{self.name}: ⏳ Metadata read timed out")
+                    self.server_name = ""
+
+                # DISCOVERY TIMEOUT
+                try:
+                    self.nodes = run_with_timeout(self._discover_nodes, TIMEOUT_DISCOVERY)
+                except TimeoutError:
+                    logging.error(f"{self.name}: ⏳ Node discovery timed out")
+                    self.status = ConnectionStatus.ERROR
+                    return False
+
+                logging.info(f"{self.name}: 🔁 Node map built ({len(self.nodes)} nodes).")
+                self.status = ConnectionStatus.CONNECTED
+                logging.info(f"{self.name}: ✅ CONNECTED")
+                return True
+
+            except TimeoutError as e:
+                logging.error(f"{self.name}: ⏳ Connection timeout: {e}")
+                self.status = ConnectionStatus.DISCONNECTED
+                self.client = None
                 return False
 
-            logging.info(f"{self.name}: 🔁 Node map built ({len(self.nodes)} nodes).")
-            self.status = ConnectionStatus.CONNECTED
-            logging.info(f"{self.name}: ✅ CONNECTED")
-            return True
-
-        except TimeoutError as e:
-            logging.error(f"{self.name}: ⏳ Connection timeout: {e}")
-            self.status = ConnectionStatus.DISCONNECTED
-            self.client = None
-            return False
-
-        except Exception as e:
-            logging.error(f"{self.name}: ❌ Connection error: {e}")
-            self.status = ConnectionStatus.DISCONNECTED
-            self.client = None
-            return False
+            except Exception as e:
+                logging.error(f"{self.name}: ❌ Connection error: {e}")
+                self.status = ConnectionStatus.DISCONNECTED
+                self.client = None
+                return False
 
     # ----------------------------------------
     # READ DATA
     # ----------------------------------------
     def read_data(self) -> Dict[str, Any]:
-        data = {
-            "name": self.name,
-            "status": self.status.value,
-            "url": self.url,
-            "nodes": {},
-        }
+        with self._lock:
+            data = {
+                "name": self.name,
+                "status": self.status.value,
+                "url": self.url,
+                "nodes": {},
+            }
 
-        if self.status != ConnectionStatus.CONNECTED or not self.client:
-            return data
-
-        try:
-            ids = list(self.nodes.values())
-            names = list(self.nodes.keys())
-
-            if not ids:
-                data["error"] = "No readable nodes."
+            if self.status != ConnectionStatus.CONNECTED or not self.client:
                 return data
 
-            values = self.client.get_values(ids)
+            try:
+                ids = list(self.nodes.values())
+                names = list(self.nodes.keys())
 
-            for n, v in zip(names, values):
-                data["nodes"][n] = v
+                if not ids:
+                    data["error"] = "No readable nodes."
+                    return data
 
-        except UaStatusCodeError as e:
-            self.status = ConnectionStatus.ERROR
-            data["error"] = f"OPC UA read error: {e}"
-        except Exception:
-            data["error"] = "Temporary read failure."
+                values = self.client.get_values(ids)
+                for n, v in zip(names, values):
+                    data["nodes"][n] = v
 
-        return data
+            except UaStatusCodeError as e:
+                self.status = ConnectionStatus.ERROR
+                data["error"] = f"OPC UA read error: {e}"
+            except Exception:
+                data["error"] = "Temporary read failure."
+
+            return data

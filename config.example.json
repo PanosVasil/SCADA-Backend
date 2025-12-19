@@ -1,0 +1,16 @@
+{
+  "plc_config": [
+    {
+      "id": "example_park",
+      "name": "Example Solar Park",
+      "url": "opc.tcp://PLC_IP:4840"
+    }
+  ],
+  "common_root_node_id": "ns=4;i=2",
+  "broadcast_interval_seconds": 2.0,
+  "plc_reconnect_delay_minutes": 10,
+
+  "timeout_connect": 20,
+  "timeout_metadata": 10,
+  "timeout_discovery": 90
+}
